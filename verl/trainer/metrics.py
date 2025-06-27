@@ -25,6 +25,8 @@ def reduce_metrics(metrics: Dict[str, List[Any]]) -> Dict[str, Any]:
 
 
 def compute_data_metrics(batch: DataProto, use_critic: bool = False) -> Dict[str, Any]:
+    """从 batch 数据中提取各类训练指标（score、reward、advantage、return、length 等），并返回一个包含统计信息的字典"""
+
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
 
@@ -95,6 +97,7 @@ def compute_data_metrics(batch: DataProto, use_critic: bool = False) -> Dict[str
 
 
 def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Dict[str, Any]:
+    """根据 timing_raw 中的时间信息，结合 batch 中 token 数量，计算每 token 的耗时。"""
     num_response_tokens = torch.sum(batch.batch["response_mask"]).item()
     num_overall_tokens = sum(batch.meta_info["global_token_num"])
     num_tokens_of_section = {
@@ -111,6 +114,7 @@ def compute_timing_metrics(batch: DataProto, timing_raw: Dict[str, float]) -> Di
 
 
 def compute_throughout_metrics(batch: DataProto, timing_raw: Dict[str, float], num_gpus: int) -> Dict[str, Any]:
+    """基于 token 总数和 step 耗时，计算吞吐量（tokens per second per GPU）等性能指标。"""
     total_num_tokens = sum(batch.meta_info["global_token_num"])
     time = timing_raw["step"]
     return {

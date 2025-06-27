@@ -312,6 +312,7 @@ class RayPPOTrainer:
             self.best_val_reward_score = self.val_reward_score
             self.best_global_step = self.global_step
 
+        # 删除旧的ckpts
         remove_obsolete_ckpt(
             self.config.trainer.save_checkpoint_path,
             self.global_step,
@@ -319,6 +320,8 @@ class RayPPOTrainer:
             self.config.trainer.save_limit,
         )
         folder_path = os.path.join(self.config.trainer.save_checkpoint_path, f"global_step_{self.global_step}")
+       
+        # 保存Actor模型
         actor_path = os.path.join(folder_path, "actor")
         self.actor_rollout_ref_wg.save_checkpoint(actor_path, save_model_only=self.config.trainer.save_model_only)
 
@@ -326,10 +329,12 @@ class RayPPOTrainer:
             critic_path = os.path.join(folder_path, "critic")
             self.critic_wg.save_checkpoint(critic_path, save_model_only=self.config.trainer.save_model_only)
 
+        # 保存dataloader状态
         dataloader_path = os.path.join(folder_path, "dataloader.pt")
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_path)
 
+        # 记录ckpts信息
         checkpointer_tracker_info = {
             "best_global_step": self.best_global_step,
             "best_val_reward_score": round(self.best_val_reward_score, 4),
@@ -447,23 +452,33 @@ class RayPPOTrainer:
         return {"val/reward_score": self.val_reward_score, **val_reward_metrics}
 
     def _balance_batch(self, batch: DataProto, metrics: Dict[str, Any], logging_prefix: str = "global_seqlen") -> None:
-        """Reorder the data on single controller such that each dp rank gets similar total tokens"""
+        """Reorder the data on single controller such that each dp rank gets similar total tokens
+        | 对batch数据进行序列长度的负载均衡，每个dp rank上的处理的token数尽量接近。
+        """
         attention_mask = batch.batch["attention_mask"]
         batch_size = attention_mask.shape[0]
+
+        # 计算每个样本的实际token数量，即序列长度
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1).tolist()  # (train_batch_size,)
         world_size = self.actor_rollout_ref_wg.world_size
+
+        # 划分数据的索引，每个dp rank上的处理的token数尽量接近
         global_partition_lst = get_seqlen_balanced_partitions(
             global_seqlen_lst, k_partitions=world_size, equal_size=True
         )
+
         # reorder based on index. The data will be automatically equally partitioned by dispatch function
         global_idx = torch.tensor([j for partition in global_partition_lst for j in partition])
         batch.reorder(global_idx)
+
+        # 记录重排的结果
         global_balance_stats = log_seqlen_unbalance(
             seqlen_list=global_seqlen_lst, partitions=global_partition_lst, prefix=logging_prefix
         )
         metrics.update(global_balance_stats)
 
     def _make_batch_data(self, metrics: Dict[str, Any]) -> DataProto:
+        '''准备训练的batch数据'''    
         batch = None
         all_metrics = defaultdict(list)
         num_try_make_batch = 0
@@ -510,7 +525,7 @@ class RayPPOTrainer:
             new_batch = new_batch.repeat(repeat_times=self.config.worker.rollout.n, interleave=True)
             new_batch = new_batch.union(gen_batch_output)
 
-            # filter group
+            # filter group | 根据奖励过滤掉奖励分数在0.01-0.99之间的输出，保证Advantage非0。这是DAPO的改进
             if self.config.algorithm.online_filtering:
                 reward_tensor, reward_metrics = ray.get(self.reward_fn.compute_reward.remote(new_batch))
                 new_batch.batch["token_level_scores"] = reward_tensor
@@ -528,6 +543,7 @@ class RayPPOTrainer:
                 kept_sample_idxs = [idx for idx, uid in enumerate(uids) if uid in kept_uids]
                 new_batch = new_batch[kept_sample_idxs]
 
+            # 校验batch size是否达到rollout_batch_size
             batch = DataProto.concat([batch, new_batch]) if batch is not None else new_batch
             current_batch_size = len(batch) // self.config.worker.rollout.n
             rollout_batch_size = self.config.data.rollout_batch_size
@@ -573,7 +589,7 @@ class RayPPOTrainer:
         self.data_iterator = iter(self.train_dataloader)
         while self.global_step < self.training_steps:
             self.global_step += 1
-            
+
             metrics, timing_raw = {}, {}
             with timer("step", timing_raw):
                 # make a batch of data
@@ -612,6 +628,7 @@ class RayPPOTrainer:
                         values = self.critic_wg.compute_values(batch)
                         batch = batch.union(values)
 
+                # 计算优势Advantage
                 with timer("adv", timing_raw):
                     if "token_level_scores" not in batch.batch:
                         # get token level scores asynchronously
@@ -663,6 +680,7 @@ class RayPPOTrainer:
 
                     metrics.update(val_metrics)
 
+                # 保存ckpts
                 if self.config.trainer.save_freq > 0 and self.global_step % self.config.trainer.save_freq == 0:
                     with timer("save_checkpoint", timing_raw):
                         self._save_checkpoint()
