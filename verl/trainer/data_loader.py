@@ -24,6 +24,7 @@ from .config import DataConfig
 
 
 def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, processor: Optional[ProcessorMixin]) -> None:
+    # 训练集
     train_dataset = RLHFDataset(
         data_path=config.train_files,
         tokenizer=tokenizer,
@@ -62,6 +63,7 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         drop_last=True,
     )
 
+    # 测试集
     val_dataset = RLHFDataset(
         data_path=config.val_files,
         tokenizer=tokenizer,

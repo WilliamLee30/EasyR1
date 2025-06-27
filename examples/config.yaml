@@ -24,6 +24,12 @@ algorithm:
   use_kl_loss: true
   kl_penalty: low_var_kl
   kl_coef: 1.0e-2
+  # =============
+  # 缺少了以下参数的定义
+  kl_type: null 
+  kl_horizon: null
+  kl_target : null 
+  # =============
   online_filtering: false  # dapo filter groups
 
 worker:
@@ -94,4 +100,4 @@ trainer:
   save_limit: 3  # -1 to disable
   save_model_only: false
   save_checkpoint_path: null
-  load_checkpoint_path: null
+  load_checkpoint_path: null # ckpts的路径

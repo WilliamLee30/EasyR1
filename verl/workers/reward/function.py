@@ -48,6 +48,7 @@ class FunctionRewardManager(ABC):
     """Reward manager for rule-based reward."""
 
     def __init__(self, config: RewardConfig, tokenizer: PreTrainedTokenizer):
+        # 初始化加载Reward奖励模型
         if config.reward_function is None:
             raise ValueError("Reward function is not provided.")
 
@@ -61,7 +62,8 @@ class FunctionRewardManager(ABC):
             spec.loader.exec_module(module)
         except Exception as e:
             raise RuntimeError(f"Failed to load reward function: {e}")
-
+        
+        # 加载奖励函数
         if not hasattr(module, config.reward_function_name):
             raise AttributeError(f"Module {module} does not have function {config.reward_function_name}.")
 
@@ -108,6 +110,7 @@ class BatchFunctionRewardManager(FunctionRewardManager):
     reward_fn: BatchRewardFunction
 
     def compute_reward(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
+        # 计算奖励并返回
         reward_inputs = []
         response_ids = data.batch["responses"]
         response_length = data.batch["response_mask"].sum(dim=-1)

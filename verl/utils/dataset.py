@@ -115,6 +115,7 @@ class RLHFDataset(Dataset):
         else:
             data_split = "train"
 
+        # 加载数据集
         if os.path.isdir(data_path):
             # when we use dataset builder, we should always refer to the train split
             file_type = os.path.splitext(os.listdir(data_path)[0])[-1][1:].replace("jsonl", "json")
@@ -126,20 +127,36 @@ class RLHFDataset(Dataset):
             # load remote dataset from huggingface hub
             self.dataset = load_dataset(data_path, split=data_split)
 
+        # 固定提示词模版，类似于System Prompt
         self.format_prompt = None
         if format_prompt:
             with open(format_prompt, encoding="utf-8") as f:
                 self.format_prompt = f.read()
 
+        # 删除数据中超长的提示词
         if self.filter_overlong_prompts:
             self.dataset = self.dataset.filter(self._filter_overlong_prompts, desc="Filtering overlong prompts")
 
     def _build_messages(self, example: Dict[str, Any]) -> List[Dict[str, Any]]:
+        '''构建对话消息结构
+        返回示例：
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": "提示词"}
+                        ]
+                    }
+                ]
+        '''
         prompt_str: str = example[self.prompt_key]
+        # 将提示词插入系统提示词模版中
         if self.format_prompt:
             format_prompt = Template(self.format_prompt.strip())
             prompt_str = format_prompt.render(content=prompt_str)
 
+        # 构建图文混合的消息结构
         if self.image_key in example:
             # https://huggingface.co/docs/transformers/en/tasks/image_text_to_text
             content_list = []
@@ -158,14 +175,19 @@ class RLHFDataset(Dataset):
         messages = self._build_messages(example)
         if self.image_key in example:
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+             
+            # 处理图像：缩放
             images = example[self.image_key] or []
             if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):  # image paths
                 images = [os.path.join(self.image_dir, image) for image in images]
-
             resized_images = [
                 process_image(image, min_pixels=self.min_pixels, max_pixels=self.max_pixels) for image in images
             ] or None
+
+            # 将图像和提示词进行tokenization
             model_inputs = self.processor(resized_images, [prompt], add_special_tokens=False, return_tensors="pt")
+
+            # 检查token数量是否在限制范围内
             return model_inputs["input_ids"].size(-1) <= self.max_prompt_length
         else:
             input_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
@@ -217,6 +239,8 @@ class RLHFDataset(Dataset):
             left_pad=True,
             truncation=self.truncation,
         )
+
+        # 对提示词长度进行截断：与之前过滤超长提示词不冲突，这里是仅针对不过滤条件下的截断操作
         raw_prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         if len(raw_prompt_ids) > self.max_prompt_length:
             if self.truncation == "left":

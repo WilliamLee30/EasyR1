@@ -187,6 +187,7 @@ class RayPPOTrainer:
         self.use_reward_model = Role.RewardModel in role_worker_mapping
         self.ray_worker_group_cls = ray_worker_group_cls
 
+        # 定义KL散度计算方式
         # define KL control
         if config.algorithm.disable_kl:
             self.use_reference_policy = False
@@ -196,6 +197,7 @@ class RayPPOTrainer:
             self.use_reference_policy = True
             self.kl_ctrl = get_kl_controller(config.algorithm)
 
+        # 定义是否使用critic模型，即优势估计的方式
         if config.algorithm.adv_estimator == AdvantageEstimator.GAE:
             self.use_critic = True
         else:
@@ -204,6 +206,7 @@ class RayPPOTrainer:
         if config.algorithm.adv_estimator not in list(AdvantageEstimator):
             raise NotImplementedError(f"Unknown advantage estimator: {config.algorithm.adv_estimator}.")
 
+        # 校验batch size的合法性
         if config.data.rollout_batch_size % config.worker.actor.global_batch_size != 0:
             raise ValueError("Rollout batch size must be divisible by actor global batch size.")
 
@@ -231,6 +234,7 @@ class RayPPOTrainer:
         ):
             raise ValueError("GRPO and RLOO algorithm need `config.worker.rollout.n > 1`.")
 
+        # 定义训练的总步数
         if config.trainer.max_steps is not None:
             self.training_steps = config.trainer.max_steps
         else:
@@ -241,7 +245,11 @@ class RayPPOTrainer:
         print(f"Total training steps: {self.training_steps}")
 
     def init_workers(self) -> None:
-        """Init resource pool and worker group"""
+        """Init resource pool and worker group
+        根据配置初始化多个“角色”（如 Actor、Critic、Reward Model 等），并为每个角色分配资源池（Resource Pool），\
+        然后在这些资源池上创建和启动对应的 Ray Worker 组（Worker Group），用于后续的分布式训练或推理。
+        """
+        # 初始化资源池与映射结构
         self.resource_pool_manager.create_resource_pool()
         self.resource_pool_to_cls = {pool: {} for pool in self.resource_pool_manager.resource_pool_dict.values()}
 
@@ -272,7 +280,7 @@ class RayPPOTrainer:
             )
             self.resource_pool_to_cls[resource_pool]["rm"] = rm_cls
 
-        # initialize WorkerGroup
+        # initialize WorkerGroup | 启动分布式workers
         # NOTE: if you want to use a different resource pool for each role, which can support different parallel size,
         # you should not use `create_colocated_worker_cls`. Instead, directly pass different resource pool to different worker groups.
         # See https://github.com/volcengine/verl/blob/master/examples/ray/tutorial.ipynb for more information.
@@ -340,13 +348,17 @@ class RayPPOTrainer:
             raise ValueError("`load_checkpoint_path` should end with `global_step_*`.")
 
         print(f"Load from checkpoint: {self.config.trainer.load_checkpoint_path}.")
+
         self.global_step = int(self.config.trainer.load_checkpoint_path.strip(os.path.sep).split("global_step_")[-1])
+
+        # 加载Actor模型权重
         actor_path = os.path.join(self.config.trainer.load_checkpoint_path, "actor")
         self.actor_rollout_ref_wg.load_checkpoint(actor_path)
         if self.use_critic:
             critic_path = os.path.join(self.config.trainer.load_checkpoint_path, "critic")
             self.critic_wg.load_checkpoint(critic_path)
 
+        # 恢复dataloader的状态：shuffle状态、batch index等
         dataloader_path = os.path.join(self.config.trainer.load_checkpoint_path, "dataloader.pt")
         if os.path.exists(dataloader_path):
             dataloader_state_dict = torch.load(dataloader_path, weights_only=False)
@@ -378,14 +390,18 @@ class RayPPOTrainer:
         sample_inputs, sample_outputs, sample_labels, sample_scores = [], [], [], []
         reward_metrics_lst = defaultdict(list)
         print("Start validation...")
-        self.actor_rollout_ref_wg.prepare_rollout_engine()
+        self.actor_rollout_ref_wg.prepare_rollout_engine() 
+
         for batch_dict in self.val_dataloader:
+            # 数据格式转换
             test_batch = DataProto.from_single_dict(batch_dict)
-            # Store original inputs
+
+            # Store original inputs ｜ 获取并保存原始输入
             input_ids = test_batch.batch["input_ids"]
             input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
             sample_inputs.extend(input_texts)
 
+            # 构建用于生成的batch
             test_gen_batch = test_batch.pop(
                 batch_keys=["input_ids", "attention_mask", "position_ids"],
                 non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
@@ -393,9 +409,13 @@ class RayPPOTrainer:
             test_gen_batch.meta_info = self.config.worker.rollout.val_override_config
             test_gen_batch.meta_info["min_pixels"] = self.config.data.min_pixels
             test_gen_batch.meta_info["max_pixels"] = self.config.data.max_pixels
-
+            
+            # Padding适配分布式GPU：具体是对batch size进行padding，使得能够被world_size整除，保证所有GPU都有分配的任务
             test_gen_batch, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_ref_wg.world_size)
+            
             test_output_gen_batch = self.actor_rollout_ref_wg.generate_sequences(test_gen_batch)
+            
+            #去除之前的padding 样本 
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch, pad_size=pad_size)
 
             # Store generated outputs
@@ -416,8 +436,11 @@ class RayPPOTrainer:
             for key, value in reward_metrics.items():
                 reward_metrics_lst[key].extend(value)
 
+        # 关闭推理引擎并打印日志
         self.actor_rollout_ref_wg.release_rollout_engine()
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
+
+        # 计算所有batch的平均奖励分数和其他指标
         self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
         val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
         print("Finish validation.")
@@ -550,7 +573,7 @@ class RayPPOTrainer:
         self.data_iterator = iter(self.train_dataloader)
         while self.global_step < self.training_steps:
             self.global_step += 1
-
+            
             metrics, timing_raw = {}, {}
             with timer("step", timing_raw):
                 # make a batch of data

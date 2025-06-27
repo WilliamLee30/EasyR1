@@ -65,6 +65,7 @@ class Runner:
         }
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
+        # 定义奖励函数
         if config.worker.reward.reward_type == "sequential":
             RewardManager = SequentialFunctionRewardManager
         elif config.worker.reward.reward_type == "batch":
@@ -75,7 +76,8 @@ class Runner:
         RemoteRewardManager = ray.remote(RewardManager).options(num_cpus=config.worker.reward.num_cpus)
         reward_fn = RemoteRewardManager.remote(config.worker.reward, tokenizer)
         val_reward_fn = RemoteRewardManager.remote(config.worker.reward, tokenizer)
-
+        
+        # 创建训练和验证集的数据加载器
         train_dataloader, val_dataloader = create_dataloader(config.data, tokenizer, processor)
 
         trainer = RayPPOTrainer(

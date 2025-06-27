@@ -148,7 +148,7 @@ class TrainerConfig:
 
 @dataclass
 class PPOConfig:
-    data: DataConfig = field(default_factory=DataConfig)
+    data: a = field(default_factory=DataConfig)
     worker: WorkerConfig = field(default_factory=WorkerConfig)
     algorithm: AlgorithmConfig = field(default_factory=AlgorithmConfig)
     trainer: TrainerConfig = field(default_factory=TrainerConfig)
